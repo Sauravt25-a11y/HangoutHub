@@ -5,7 +5,7 @@ const roomSchema = new mongoose.Schema({
     type: String,
     unique: true,
     required: true,
-    default: () => Math.random().toString(36).substr(2, 8).toUpperCase()
+    default: () => Math.random().toString(36).substr(2, 6).toUpperCase()
   },
   hostName: {
     type: String,

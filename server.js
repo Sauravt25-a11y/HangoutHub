@@ -1,28 +1,28 @@
 import express from 'express';
 import http from 'http';
 import { Server } from 'socket.io';
+import fs from 'fs';
+import path from 'path';
 import mongoose from 'mongoose';
 import Room from './Room.js';
 import User from './user.js';
 import cors from 'cors';
-import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import multer from 'multer';
 import { v4 as uuidv4 } from 'uuid';
-import fs from 'fs';
 import session from 'express-session';
 import MongoStore from 'connect-mongo';
-import passport from 'passport';
-import configurePassport from './passport-config.js';
 import jwt from 'jsonwebtoken';
+import os from 'os';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-
 const app = express();
+
+// Create HTTP server
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
@@ -66,26 +66,21 @@ mongoose.connect(MONGODB_URL)
   .then(() => console.log('✅ MongoDB Connected'))
   .catch(err => console.error('MongoDB connection error:', err));
 
-// Session configuration
+// Session configuration (simplified)
 app.use(session({
   secret: process.env.SESSION_SECRET || 'your-secret-key-change-this-in-production',
   resave: false,
   saveUninitialized: false,
   store: MongoStore.create({
     mongoUrl: MONGODB_URL,
-    touchAfter: 24 * 3600 // lazy session update
+    touchAfter: 24 * 3600
   }),
   cookie: {
-    secure: process.env.NODE_ENV === 'production', // HTTPS in production
+    secure: process.env.NODE_ENV === 'production',
     httpOnly: true,
     maxAge: 1000 * 60 * 60 * 24 * 7 // 7 days
   }
 }));
-
-// Configure Passport
-configurePassport();
-app.use(passport.initialize());
-app.use(passport.session());
 
 // Middleware
 app.use(cors({
@@ -96,41 +91,79 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/uploads', express.static(uploadsDir));
 
-// Authentication middleware
-const requireAuth = (req, res, next) => {
-  if (req.isAuthenticated()) {
-    return next();
-  }
-  res.status(401).json({ error: 'Authentication required' });
-};
+// Simple login route (replaces Google OAuth)
+app.post('/auth/login', async (req, res) => {
+  try {
+    const { name, email } = req.body;
+    
+    if (!name || !email) {
+      return res.status(400).json({ error: 'Name and email are required' });
+    }
 
-// Auth routes
-app.get('/auth/google',
-  passport.authenticate('google', { scope: ['profile', 'email'] })
-);
+    // Find or create user
+    let user = await User.findOne({ email });
+    if (!user) {
+      user = new User({
+        name,
+        email,
+        picture: `https://ui-avatars.com/api/?name=${encodeURIComponent(name)}&background=3B82F6&color=fff`,
+        lastLogin: new Date()
+      });
+      await user.save();
+    } else {
+      user.lastLogin = new Date();
+      await user.save();
+    }
 
-app.get('/auth/google/callback',
-  passport.authenticate('google', { failureRedirect: '/?error=auth_failed' }),
-  (req, res) => {
     // Generate JWT token
     const token = jwt.sign(
-      { userId: req.user._id, email: req.user.email },
+      { userId: user._id, email: user.email },
       process.env.JWT_SECRET || 'your-jwt-secret',
       { expiresIn: '7d' }
     );
+
+    // Store user in session
+    req.session.userId = user._id;
     
-    // Redirect to frontend with token
-    res.redirect(`/?token=${token}&user=${encodeURIComponent(JSON.stringify(req.user.getPublicProfile()))}`);
+    res.json({ 
+      success: true, 
+      token, 
+      user: user.getPublicProfile() 
+    });
+    
+  } catch (error) {
+    console.error('Login error:', error);
+    res.status(500).json({ error: 'Login failed' });
   }
-);
+});
+
+// Authentication middleware (modified for simple auth)
+const requireAuth = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    
+    if (!token) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-jwt-secret');
+    const user = await User.findById(decoded.userId);
+    
+    if (!user) {
+      return res.status(401).json({ error: 'User not found' });
+    }
+
+    req.user = user;
+    next();
+  } catch (err) {
+    res.status(401).json({ error: 'Invalid token' });
+  }
+};
 
 app.post('/auth/logout', (req, res) => {
-  req.logout((err) => {
-    if (err) return res.status(500).json({ error: 'Logout failed' });
-    req.session.destroy((err) => {
-      if (err) return res.status(500).json({ error: 'Session destroy failed' });
-      res.json({ success: true });
-    });
+  req.session.destroy((err) => {
+    if (err) return res.status(500).json({ error: 'Session destroy failed' });
+    res.json({ success: true });
   });
 });
 
@@ -148,7 +181,7 @@ app.post('/api/upload/:roomCode', requireAuth, upload.array('files', 10), async 
   try {
     const { roomCode } = req.params;
     const userName = req.user.name;
-    
+
     if (!req.files || req.files.length === 0) {
       return res.status(400).json({ error: 'No files uploaded' });
     }
@@ -179,10 +212,10 @@ app.post('/api/upload/:roomCode', requireAuth, upload.array('files', 10), async 
       });
     });
 
-    res.json({ 
-      success: true, 
+    res.json({
+      success: true,
       files: uploadedFiles,
-      message: `${uploadedFiles.length} file(s) uploaded successfully` 
+      message: `${uploadedFiles.length} file(s) uploaded successfully`
     });
 
   } catch (error) {
@@ -196,7 +229,7 @@ app.get('/api/files/:roomCode', requireAuth, async (req, res) => {
   try {
     const { roomCode } = req.params;
     const room = await Room.findOne({ code: roomCode });
-    
+
     if (!room) {
       return res.status(404).json({ error: 'Room not found' });
     }
@@ -225,7 +258,6 @@ app.delete('/api/files/:roomCode/:fileId', requireAuth, async (req, res) => {
     }
 
     const file = room.sharedFiles[fileIndex];
-    
     if (file.uploadedBy !== userName && room.hostName !== userName) {
       return res.status(403).json({ error: 'Not authorized to delete this file' });
     }
@@ -246,14 +278,13 @@ app.delete('/api/files/:roomCode/:fileId', requireAuth, async (req, res) => {
     });
 
     res.json({ success: true, message: 'File deleted successfully' });
-
   } catch (error) {
     console.error('Delete file error:', error);
     res.status(500).json({ error: 'Failed to delete file' });
   }
 });
 
-// Socket.IO authentication middleware
+// Socket.IO authentication middleware (modified)
 io.use((socket, next) => {
   const token = socket.handshake.auth.token;
   if (!token) {
@@ -286,7 +317,7 @@ async function getParticipantsData(roomCode) {
   }));
 }
 
-// Socket.IO connection handling
+// Socket.IO connection handling (rest remains the same)
 io.on('connection', socket => {
   console.log(`User connected: ${socket.user.name} (${socket.id})`);
 
@@ -302,7 +333,6 @@ io.on('connection', socket => {
       await room.save();
 
       socket.join(room.code);
-
       io.to(socket.id).emit('room-created', {
         roomCode: room.code,
         room,
@@ -318,6 +348,11 @@ io.on('connection', socket => {
 
   socket.on('join-room', async ({ roomCode }) => {
     try {
+      if (!roomCode || roomCode.length !== 6) {
+        socket.emit('error', { message: 'Room code must be exactly 6 characters' });
+        return;
+      }
+
       const room = await Room.findOne({ code: roomCode });
       if (!room) {
         socket.emit('error', { message: 'Room not found' });
@@ -328,22 +363,20 @@ io.on('connection', socket => {
       if (room.hostName === socket.user.name) {
         socket.join(room.code);
         const participants = await getParticipantsData(room.code);
-
         io.to(socket.id).emit('room-joined', {
           room,
           user: { id: socket.id, ...socket.user.getPublicProfile() },
           participants: participants.filter(p => p.id !== socket.id)
         });
-
-        socket.to(room.code).emit('user-joined', { 
-          id: socket.id, 
+        socket.to(room.code).emit('user-joined', {
+          id: socket.id,
           ...socket.user.getPublicProfile()
         });
       } else {
         // Non-host users need admission
-        room.waitingList.push({ 
-          id: socket.id, 
-          name: socket.user.name, 
+        room.waitingList.push({
+          id: socket.id,
+          name: socket.user.name,
           profile: socket.user.getPublicProfile()
         });
         await room.save();
@@ -366,14 +399,14 @@ io.on('connection', socket => {
 
         console.log(`${socket.user.name} is waiting for admission to room ${roomCode}`);
       }
-
     } catch (err) {
       console.error('Error joining room:', err);
       socket.emit('error', { message: 'Failed to join room' });
     }
   });
 
-  // Handle admission decisions
+  // ... [Rest of the socket handlers remain the same - admit-user, admit-all, send-message, signal, disconnect]
+  
   socket.on('admit-user', async ({ roomCode, userId, admit }) => {
     try {
       const room = await Room.findOne({ code: roomCode });
@@ -388,18 +421,15 @@ io.on('connection', socket => {
         if (admittedSocket) {
           admittedSocket.join(roomCode);
           const participants = await getParticipantsData(roomCode);
-          
           io.to(userId).emit('room-joined', {
             room,
             user: { id: userId, ...admittedSocket.user.getPublicProfile() },
             participants: participants.filter(p => p.id !== userId)
           });
-          
           io.in(roomCode).emit('user-joined', {
             id: userId,
             ...admittedSocket.user.getPublicProfile()
           });
-          
           console.log(`${waitingUser.name} admitted to room ${roomCode}`);
         }
       } else {
@@ -417,13 +447,11 @@ io.on('connection', socket => {
           waitingList: room.waitingList
         });
       });
-
     } catch (err) {
       console.error('Error admitting user:', err);
     }
   });
 
-  // Admit all waiting users
   socket.on('admit-all', async ({ roomCode }) => {
     try {
       const room = await Room.findOne({ code: roomCode });
@@ -438,13 +466,11 @@ io.on('connection', socket => {
         if (userSocket) {
           userSocket.join(roomCode);
           const participants = await getParticipantsData(roomCode);
-          
           io.to(user.id).emit('room-joined', {
             room,
             user: { id: user.id, ...userSocket.user.getPublicProfile() },
             participants: participants.filter(p => p.id !== user.id)
           });
-          
           io.in(roomCode).emit('user-joined', {
             id: user.id,
             ...userSocket.user.getPublicProfile()
@@ -453,7 +479,6 @@ io.on('connection', socket => {
       }
 
       console.log(`Admitted ${waitingUsers.length} users to room ${roomCode}`);
-      
       const roomSockets = await io.in(roomCode).fetchSockets();
       roomSockets.forEach(s => {
         io.to(s.id).emit('waiting-list-updated', {
@@ -461,13 +486,11 @@ io.on('connection', socket => {
           waitingList: []
         });
       });
-
     } catch (err) {
       console.error('Error admitting all users:', err);
     }
   });
 
-  // Chat messages
   socket.on('send-message', async ({ roomCode, message }) => {
     try {
       const room = await Room.findOne({ code: roomCode });
@@ -482,14 +505,12 @@ io.on('connection', socket => {
 
       room.messages.push(messageData);
       await room.save();
-
       io.in(roomCode).emit('new-message', messageData);
     } catch (err) {
       console.error('Error sending message:', err);
     }
   });
 
-  // WebRTC signaling
   socket.on('signal', ({ to, description, candidate }) => {
     socket.to(to).emit('signal', {
       from: socket.id,
@@ -498,11 +519,10 @@ io.on('connection', socket => {
     });
   });
 
-  // Disconnect handling
   socket.on('disconnect', async () => {
     console.log(`User disconnected: ${socket.user?.name} (${socket.id})`);
-    
     const rooms = Array.from(socket.rooms);
+
     for (const roomCode of rooms) {
       if (roomCode !== socket.id) {
         try {
@@ -510,7 +530,7 @@ io.on('connection', socket => {
           if (room) {
             room.waitingList = room.waitingList.filter(u => u.id !== socket.id);
             await room.save();
-            
+
             const roomSockets = await io.in(roomCode).fetchSockets();
             roomSockets.forEach(s => {
               io.to(s.id).emit('waiting-list-updated', {
@@ -519,7 +539,6 @@ io.on('connection', socket => {
               });
             });
           }
-          
           socket.to(roomCode).emit('user-left', { userId: socket.id });
         } catch (err) {
           console.error('Error handling disconnect:', err);
@@ -529,10 +548,27 @@ io.on('connection', socket => {
   });
 });
 
+// Function to get local IP address
+function getLocalIP() {
+  const interfaces = os.networkInterfaces();
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        return iface.address;
+      }
+    }
+  }
+  return '127.0.0.1'; // fallback
+}
+
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🚀 HangoutHub server running on http://localhost:${PORT}`);
+server.listen(PORT, '0.0.0.0', () => {
+  const localIP = getLocalIP();
+  console.log(`🚀 HangoutHub server running on port ${PORT} (HTTP)`);
   console.log(`📁 Serving files from: ${path.join(__dirname, 'public')}`);
   console.log(`📎 File uploads saved to: ${uploadsDir}`);
-  console.log('🔐 Google OAuth configured');
+  console.log('🔐 Simple login authentication configured');
+  console.log(`🌐 Local access: http://localhost:${PORT}`);
+  console.log(`🌐 Network access: http://${localIP}:${PORT}`);
+  console.log(`📱 Share this link with devices on the same Wi-Fi: http://${localIP}:${PORT}`);
 });

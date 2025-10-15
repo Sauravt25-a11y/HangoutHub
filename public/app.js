@@ -16,12 +16,14 @@ function generateUniqueId() {
 // DOM Elements
 const homePage = document.getElementById('homePage');
 const chatApp = document.getElementById('chatApp');
-const googleSignInBtn = document.getElementById('googleSignInBtn');
+const loginForm = document.getElementById('loginForm');
 const loadingState = document.getElementById('loadingState');
 const userProfile = document.getElementById('userProfile');
+const permissionRequest = document.getElementById('permissionRequest');
 const roomControls = document.getElementById('roomControls');
 const errorMessage = document.getElementById('errorMessage');
 const logoutBtn = document.getElementById('logoutBtn');
+const grantPermissionsBtn = document.getElementById('grantPermissionsBtn');
 const createRoomBtn = document.getElementById('createRoomBtn');
 const joinRoomBtn = document.getElementById('joinRoomBtn');
 const roomCodeInput = document.getElementById('roomCodeInput');
@@ -55,6 +57,11 @@ const headerUserInfo = document.getElementById('headerUserInfo');
 const headerUserAvatar = document.getElementById('headerUserAvatar');
 const headerUserName = document.getElementById('headerUserName');
 
+// Login form elements
+const loginFormElement = document.getElementById('loginFormElement');
+const nameInput = document.getElementById('nameInput');
+const emailInput = document.getElementById('emailInput');
+
 // Initialize app
 document.addEventListener('DOMContentLoaded', () => {
   checkAuthStatus();
@@ -62,51 +69,42 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Check if user is already authenticated
 async function checkAuthStatus() {
-  // Check URL parameters for auth callback
-  const urlParams = new URLSearchParams(window.location.search);
-  const token = urlParams.get('token');
-  const userParam = urlParams.get('user');
+  // Check for stored token
+  const storedToken = localStorage.getItem('authToken');
+  const storedUser = localStorage.getItem('currentUser');
   
-  if (token && userParam) {
+  if (storedToken && storedUser) {
     try {
-      authToken = token;
-      currentUser = JSON.parse(decodeURIComponent(userParam));
+      authToken = storedToken;
+      currentUser = JSON.parse(storedUser);
       
-      // Clean URL
-      window.history.replaceState({}, document.title, '/');
+      // Verify token is still valid
+      const response = await fetch('/auth/user', { 
+        headers: { 'Authorization': `Bearer ${authToken}` }
+      });
       
-      showUserProfile();
-      connectSocket();
+      if (response.ok) {
+        showUserProfile();
+        connectSocket();
+        return;
+      } else {
+        // Token expired, clear storage
+        localStorage.removeItem('authToken');
+        localStorage.removeItem('currentUser');
+      }
     } catch (err) {
-      console.error('Auth callback error:', err);
-      showError('Authentication failed. Please try again.');
+      console.error('Auth check error:', err);
+      localStorage.removeItem('authToken');
+      localStorage.removeItem('currentUser');
     }
-    return;
   }
-
-  // Check for existing session
-  try {
-    const response = await fetch('/auth/user', {
-      credentials: 'include'
-    });
-    
-    if (response.ok) {
-      const data = await response.json();
-      currentUser = data.user;
-      showUserProfile();
-      connectSocket();
-    } else {
-      showSignInButton();
-    }
-  } catch (err) {
-    console.error('Auth check error:', err);
-    showSignInButton();
-  }
+  
+  showLoginForm();
 }
 
-// Show sign in button
-function showSignInButton() {
-  document.getElementById('googleSignInContainer').classList.remove('hidden');
+// Show login form
+function showLoginForm() {
+  loginForm.classList.remove('hidden');
   loadingState.classList.add('hidden');
   userProfile.classList.add('hidden');
   roomControls.classList.add('hidden');
@@ -115,17 +113,27 @@ function showSignInButton() {
 // Show user profile
 function showUserProfile() {
   if (!currentUser) return;
-  
-  document.getElementById('googleSignInContainer').classList.add('hidden');
+
+  loginForm.classList.add('hidden');
   loadingState.classList.add('hidden');
   userProfile.classList.remove('hidden');
-  roomControls.classList.remove('hidden');
-  
+
+  // Check if permissions were previously granted
+  const permissionsGranted = localStorage.getItem('permissionsGranted') === 'true';
+
+  if (permissionsGranted) {
+    permissionRequest.classList.add('hidden');
+    roomControls.classList.remove('hidden');
+  } else {
+    permissionRequest.classList.remove('hidden');
+    roomControls.classList.add('hidden');
+  }
+
   // Update profile display
   document.getElementById('userAvatar').src = currentUser.picture || '/default-avatar.png';
   document.getElementById('userDisplayName').textContent = currentUser.name;
   document.getElementById('userEmail').textContent = currentUser.email;
-  
+
   // Update header user info
   if (headerUserAvatar && headerUserName) {
     headerUserAvatar.src = currentUser.picture || '/default-avatar.png';
@@ -134,22 +142,106 @@ function showUserProfile() {
 }
 
 // Show error message
-function showError(message) {
+function showError(message, type = 'error') {
   errorMessage.textContent = message;
   errorMessage.classList.remove('hidden');
+
+  // Change color based on type
+  if (type === 'success') {
+    errorMessage.classList.remove('bg-red-600');
+    errorMessage.classList.add('bg-green-600');
+  } else {
+    errorMessage.classList.remove('bg-green-600');
+    errorMessage.classList.add('bg-red-600');
+  }
+
   setTimeout(() => {
     errorMessage.classList.add('hidden');
   }, 5000);
 }
 
+// Request camera and microphone permissions
+async function requestPermissions() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true
+    });
+
+    // Stop the stream immediately since we just needed permission
+    stream.getTracks().forEach(track => track.stop());
+
+    // Permissions granted, store in localStorage and show room controls
+    localStorage.setItem('permissionsGranted', 'true');
+    permissionRequest.classList.add('hidden');
+    roomControls.classList.remove('hidden');
+    showError('Permissions granted! You can now create or join rooms.', 'success');
+  } catch (err) {
+    console.error('Permission denied:', err);
+    localStorage.removeItem('permissionsGranted'); // Ensure it's not set
+    showError('Camera and microphone access is required for video calls. Please allow access and try again.');
+  }
+}
+
+// Handle login
+async function handleLogin(event) {
+  event.preventDefault();
+  
+  const name = nameInput.value.trim();
+  const email = emailInput.value.trim();
+  
+  if (!name || !email) {
+    showError('Please enter both name and email');
+    return;
+  }
+  
+  // Basic email validation
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    showError('Please enter a valid email address');
+    return;
+  }
+  
+  showLoading();
+  
+  try {
+    const response = await fetch('/auth/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ name, email })
+    });
+    
+    const data = await response.json();
+    
+    if (data.success) {
+      authToken = data.token;
+      currentUser = data.user;
+      
+      // Store in localStorage for persistence
+      localStorage.setItem('authToken', authToken);
+      localStorage.setItem('currentUser', JSON.stringify(currentUser));
+      
+      showUserProfile();
+      connectSocket();
+    } else {
+      showError(data.error || 'Login failed');
+      showLoginForm();
+    }
+  } catch (err) {
+    console.error('Login error:', err);
+    showError('Login failed. Please try again.');
+    showLoginForm();
+  }
+}
+
 // Connect to Socket.IO with authentication
 function connectSocket() {
   if (!authToken) return;
-  
+
   socket = io({
-    auth: {
-      token: authToken
-    }
+    auth: { token: authToken }
   });
 
   // Socket event handlers
@@ -167,11 +259,9 @@ function connectSocket() {
     currentRoom = room;
     showChatApp();
     roomCodeDisplay.textContent = roomCode;
-    
     await startLocalMedia();
     renderParticipants([currentUser]);
     renderMessages(room.messages || []);
-    
     admitAllBtn.classList.remove('hidden');
     loadFiles();
     console.log('Room created successfully');
@@ -181,17 +271,13 @@ function connectSocket() {
     currentRoom = room;
     showChatApp();
     roomCodeDisplay.textContent = room.code;
-    
     renderParticipants([currentUser, ...participants]);
     renderMessages(room.messages || []);
-    
     await startLocalMedia();
     participants.forEach(p => startConnection(p.id));
-    
     if (currentUser.name === room.hostName) {
       admitAllBtn.classList.remove('hidden');
     }
-    
     loadFiles();
     console.log('Joined room successfully');
   });
@@ -243,7 +329,6 @@ function connectSocket() {
       peerConnections[userId].close();
       delete peerConnections[userId];
     }
-    
     const videoElement = document.getElementById(userId);
     if (videoElement && videoElement.parentNode) {
       videoElement.parentNode.remove();
@@ -261,14 +346,12 @@ function connectSocket() {
       message: message,
       type: 'system'
     });
-    
     addMessage({
       sender: file.uploadedBy,
       message: `📎 ${file.originalName}`,
       type: 'file',
       fileData: file
     });
-    
     loadFiles();
   });
 
@@ -296,21 +379,20 @@ function connectSocket() {
     if (!peerConnections[from]) {
       await startConnection(from, false);
     }
-    
+
     const pc = peerConnections[from];
-    
     if (description) {
       await pc.setRemoteDescription(description);
       if (description.type === 'offer') {
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        socket.emit('signal', { 
-          to: from, 
-          description: pc.localDescription 
+        socket.emit('signal', {
+          to: from,
+          description: pc.localDescription
         });
       }
     }
-    
+
     if (candidate) {
       await pc.addIceCandidate(candidate);
     }
@@ -318,10 +400,8 @@ function connectSocket() {
 }
 
 // Event Listeners
-googleSignInBtn.addEventListener('click', () => {
-  showLoading();
-  window.location.href = '/auth/google';
-});
+loginFormElement.addEventListener('submit', handleLogin);
+grantPermissionsBtn.addEventListener('click', requestPermissions);
 
 logoutBtn.addEventListener('click', async () => {
   try {
@@ -329,22 +409,25 @@ logoutBtn.addEventListener('click', async () => {
       method: 'POST',
       credentials: 'include'
     });
-    
+
     // Disconnect socket
     if (socket) {
       socket.disconnect();
       socket = null;
     }
-    
+
+    // Clear localStorage
+    localStorage.removeItem('authToken');
+    localStorage.removeItem('currentUser');
+
     // Clear state
     currentUser = null;
     authToken = null;
     currentRoom = null;
-    
+
     // Reset UI
-    showSignInButton();
+    showLoginForm();
     showHomePage();
-    
   } catch (err) {
     console.error('Logout error:', err);
     showError('Logout failed. Please try again.');
@@ -356,7 +439,9 @@ createRoomBtn.addEventListener('click', () => {
     showError('Please sign in first');
     return;
   }
-  socket.emit('create-room', { hostProfile: currentUser });
+  socket.emit('create-room', {
+    hostProfile: currentUser
+  });
 });
 
 joinRoomBtn.addEventListener('click', () => {
@@ -364,13 +449,18 @@ joinRoomBtn.addEventListener('click', () => {
     showError('Please sign in first');
     return;
   }
-  
+
   const roomCode = roomCodeInput.value.trim().toUpperCase();
   if (!roomCode) {
     showError('Please enter a room code');
     return;
   }
-  
+
+  if (roomCode.length !== 6) {
+    showError('Room code must be exactly 6 characters');
+    return;
+  }
+
   socket.emit('join-room', { roomCode });
 });
 
@@ -402,10 +492,10 @@ messageForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const message = messageInput.value.trim();
   if (!message || !currentRoom || !socket) return;
-  
-  socket.emit('send-message', { 
-    roomCode: currentRoom.code, 
-    message 
+
+  socket.emit('send-message', {
+    roomCode: currentRoom.code,
+    message
   });
   messageInput.value = '';
 });
@@ -432,15 +522,15 @@ refreshFilesBtn.addEventListener('click', () => {
 fileInput.addEventListener('change', (e) => {
   const files = Array.from(e.target.files);
   if (files.length === 0) return;
-  
+
   const maxSize = 100 * 1024 * 1024; // 100MB
   const oversizedFiles = files.filter(file => file.size > maxSize);
-  
+
   if (oversizedFiles.length > 0) {
     showError('Some files are too large. Maximum size is 100MB per file.');
     return;
   }
-  
+
   uploadFiles(files);
 });
 
@@ -466,7 +556,7 @@ admitAllBtn.addEventListener('click', () => {
 
 // Helper functions
 function showLoading() {
-  document.getElementById('googleSignInContainer').classList.add('hidden');
+  loginForm.classList.add('hidden');
   loadingState.classList.remove('hidden');
   userProfile.classList.add('hidden');
   roomControls.classList.add('hidden');
@@ -490,46 +580,44 @@ function showHomePage() {
 async function startLocalMedia() {
   try {
     if (!localStream) {
-      localStream = await navigator.mediaDevices.getUserMedia({ 
-        video: true, 
-        audio: true 
+      localStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true
       });
     }
     localVideo.srcObject = localStream;
-    initializeMediaControls();
   } catch (err) {
     console.error('Error accessing media:', err);
     showError('Could not access camera/microphone. Please check permissions.');
   }
+  initializeMediaControls();
 }
 
 async function startConnection(peerId, isInitiator = true) {
   const pc = new RTCPeerConnection({
     iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
   });
-  
+
   peerConnections[peerId] = pc;
-  
   localStream.getTracks().forEach(track => {
     pc.addTrack(track, localStream);
   });
-  
+
   const remoteVideo = document.createElement('video');
   remoteVideo.id = peerId;
   remoteVideo.autoplay = true;
   remoteVideo.setAttribute('aria-label', 'Remote participant video');
   remoteVideo.className = 'w-full h-full rounded-lg bg-black object-cover';
-  
+
   const videoContainer = document.createElement('div');
   videoContainer.className = 'relative bg-gray-700 rounded-lg overflow-hidden min-h-[200px]';
   videoContainer.appendChild(remoteVideo);
-  
   remoteVideos.appendChild(videoContainer);
-  
+
   pc.ontrack = (event) => {
     remoteVideo.srcObject = event.streams[0];
   };
-  
+
   pc.onicecandidate = (event) => {
     if (event.candidate && socket) {
       socket.emit('signal', {
@@ -538,7 +626,7 @@ async function startConnection(peerId, isInitiator = true) {
       });
     }
   };
-  
+
   if (isInitiator) {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -557,7 +645,7 @@ function renderParticipants(participants) {
     const li = document.createElement('li');
     li.className = 'p-2 bg-gray-800 rounded text-sm flex items-center space-x-2';
     li.setAttribute('role', 'listitem');
-    
+
     if (participant.picture) {
       const img = document.createElement('img');
       img.src = participant.picture;
@@ -565,11 +653,11 @@ function renderParticipants(participants) {
       img.className = 'w-6 h-6 rounded-full';
       li.appendChild(img);
     }
-    
+
     const span = document.createElement('span');
     span.textContent = participant.name;
     li.appendChild(span);
-    
+
     userList.appendChild(li);
   });
 }
@@ -583,197 +671,169 @@ function addMessage({ sender, message, type = 'user', fileData, senderPicture })
   const messageDiv = document.createElement('div');
   messageDiv.className = 'p-2 rounded';
   messageDiv.setAttribute('role', 'article');
-  
+
   if (type === 'system') {
     messageDiv.className += ' text-gray-400 italic text-sm';
     messageDiv.textContent = message;
   } else if (type === 'file' && fileData) {
     messageDiv.className += ' bg-gray-800';
     messageDiv.innerHTML = `
-      <div class="flex items-center space-x-2 mb-1">
-        ${senderPicture ? `<img src="${escapeHtml(senderPicture)}" alt="${escapeHtml(sender)}" class="w-5 h-5 rounded-full">` : ''}
-        <div class="font-semibold text-blue-400 text-sm">${escapeHtml(sender)}</div>
-      </div>
-      <div>
-        <a href="${encodeURI(fileData.downloadUrl)}" 
-           target="_blank" 
-           download="${escapeHtml(fileData.originalName)}"
-           aria-label="Download file: ${escapeHtml(fileData.originalName)}"
-           class="text-purple-400 hover:text-purple-300 underline">
-          ${escapeHtml(message)}
-        </a>
-        <div class="text-xs text-gray-400">${formatFileSize(fileData.size)}</div>
+      <div class="flex items-center justify-between">
+        <div class="flex items-center space-x-2">
+          ${senderPicture ? `<img src="${senderPicture}" alt="${sender}" class="w-6 h-6 rounded-full">` : ''}
+          <span class="font-medium text-white">${sender}:</span>
+          <span class="text-blue-300">${message}</span>
+        </div>
+        <div class="flex space-x-2">
+          <a href="${fileData.downloadUrl}" download="${fileData.originalName}" 
+             class="text-blue-400 hover:text-blue-300 text-sm">Download</a>
+          <span class="text-gray-400 text-xs">${formatFileSize(fileData.size)}</span>
+        </div>
       </div>
     `;
   } else {
     messageDiv.className += ' bg-gray-800';
+    const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     messageDiv.innerHTML = `
-      <div class="flex items-center space-x-2 mb-1">
-        ${senderPicture ? `<img src="${escapeHtml(senderPicture)}" alt="${escapeHtml(sender)}" class="w-5 h-5 rounded-full">` : ''}
-        <div class="font-semibold text-blue-400 text-sm">${escapeHtml(sender)}</div>
+      <div class="flex items-start space-x-2">
+        ${senderPicture ? `<img src="${senderPicture}" alt="${sender}" class="w-6 h-6 rounded-full mt-1">` : ''}
+        <div class="flex-1">
+          <div class="flex items-center space-x-2">
+            <span class="font-medium text-white">${sender}</span>
+            <span class="text-gray-400 text-xs">${timestamp}</span>
+          </div>
+          <p class="text-gray-100 mt-1">${message}</p>
+        </div>
       </div>
-      <div class="mt-1">${escapeHtml(message)}</div>
     `;
   }
-  
+
   messagesContainer.appendChild(messageDiv);
   messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
-// File upload functions
+// File upload functionality
 async function uploadFiles(files) {
-  if (!currentRoom || !authToken) return;
-  
+  if (!currentRoom || !authToken) {
+    showError('Not in a room or not authenticated');
+    return;
+  }
+
   const formData = new FormData();
   files.forEach(file => {
     formData.append('files', file);
   });
-  
-  showUploadModal();
+
   uploadController = new AbortController();
-  
+  showUploadModal();
+
   try {
     const response = await fetch(`/api/upload/${currentRoom.code}`, {
       method: 'POST',
-      body: formData,
       headers: {
         'Authorization': `Bearer ${authToken}`
       },
-      credentials: 'include',
+      body: formData,
       signal: uploadController.signal
     });
-    
+
     const result = await response.json();
-    
+
     if (result.success) {
-      loadFiles();
+      hideUploadModal();
+      showError(`${result.files.length} file(s) uploaded successfully`, 'success');
       fileInput.value = '';
     } else {
-      throw new Error(result.error || 'Upload failed');
+      hideUploadModal();
+      showError(result.error || 'Upload failed');
     }
-    
-  } catch (error) {
-    if (error.name !== 'AbortError') {
-      console.error('Upload error:', error);
-      showError(`Upload failed: ${error.message}`);
+  } catch (err) {
+    if (err.name !== 'AbortError') {
+      console.error('Upload error:', err);
+      hideUploadModal();
+      showError('Upload failed. Please try again.');
     }
-  } finally {
-    hideUploadModal();
-    uploadController = null;
   }
 }
 
 async function loadFiles() {
   if (!currentRoom || !authToken) return;
-  
+
   try {
     const response = await fetch(`/api/files/${currentRoom.code}`, {
       headers: {
         'Authorization': `Bearer ${authToken}`
-      },
-      credentials: 'include'
+      }
     });
+
     const result = await response.json();
-    
     if (result.files) {
       sharedFiles = result.files;
       renderFilesList();
       updateFilesButtonText();
     }
-  } catch (error) {
-    console.error('Failed to load files:', error);
-  }
-}
-
-async function deleteFile(fileId, fileName) {
-  if (!currentRoom || !authToken) return;
-  
-  if (!confirm(`Delete "${fileName}"?`)) return;
-  
-  try {
-    const response = await fetch(`/api/files/${currentRoom.code}/${fileId}`, {
-      method: 'DELETE',
-      headers: { 
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${authToken}`
-      },
-      credentials: 'include'
-    });
-    
-    const result = await response.json();
-    
-    if (result.success) {
-      loadFiles();
-    } else {
-      throw new Error(result.error || 'Delete failed');
-    }
-    
-  } catch (error) {
-    console.error('Delete error:', error);
-    showError(`Delete failed: ${error.message}`);
+  } catch (err) {
+    console.error('Load files error:', err);
   }
 }
 
 function renderFilesList() {
+  filesList.innerHTML = '';
+
   if (sharedFiles.length === 0) {
-    filesList.innerHTML = '<div id="noFilesMessage" class="text-gray-400 text-center py-8">No files shared yet</div>';
+    filesList.innerHTML = '<p class="text-gray-400 text-center py-4">No files shared yet</p>';
     return;
   }
-  
-  filesList.innerHTML = '';
-  
+
   sharedFiles.forEach(file => {
-    const fileDiv = document.createElement('div');
-    fileDiv.className = 'bg-gray-800 p-3 rounded-lg';
-    
-    const sizeStr = formatFileSize(file.size);
-    const dateStr = new Date(file.uploadedAt).toLocaleString();
-    
-    fileDiv.innerHTML = `
-      <div class="flex items-center justify-between">
-        <div class="flex-1 min-w-0">
-          <div class="font-medium text-white truncate">${escapeHtml(file.originalName)}</div>
-          <div class="text-xs text-gray-400">
-            ${sizeStr} • by ${escapeHtml(file.uploadedBy)} • ${dateStr}
-          </div>
-        </div>
-        <div class="ml-2 flex space-x-2">
-          <button 
-            onclick="downloadFile('${encodeURIComponent(file.downloadUrl)}', '${encodeURIComponent(file.originalName)}')"
-            class="text-blue-400 hover:text-blue-300 text-sm"
-            title="Download ${escapeHtml(file.originalName)}"
-            aria-label="Download ${escapeHtml(file.originalName)}"
-          >
-            ⬇️
-          </button>
-          ${(file.uploadedBy === currentUser?.name || (currentRoom && currentRoom.hostName === currentUser?.name)) ? 
-            `<button 
-              onclick="deleteFile('${encodeURIComponent(file.id)}', '${encodeURIComponent(file.originalName)}')"
-              class="text-red-400 hover:text-red-300 text-sm"
-              title="Delete ${escapeHtml(file.originalName)}"
-              aria-label="Delete ${escapeHtml(file.originalName)}"
-            >
-              🗑️
-            </button>` : ''
-          }
-        </div>
+    const fileItem = document.createElement('div');
+    fileItem.className = 'p-3 bg-gray-800 rounded flex items-center justify-between';
+    fileItem.innerHTML = `
+      <div class="flex-1">
+        <p class="font-medium text-white truncate">${file.originalName}</p>
+        <p class="text-sm text-gray-400">${formatFileSize(file.size)} • by ${file.uploadedBy}</p>
+        <p class="text-xs text-gray-500">${new Date(file.uploadedAt).toLocaleString()}</p>
+      </div>
+      <div class="flex space-x-2">
+        <a href="${file.downloadUrl}" download="${file.originalName}" 
+           class="text-blue-400 hover:text-blue-300 text-sm">Download</a>
+        ${(currentUser && (file.uploadedBy === currentUser.name || (currentRoom && currentRoom.hostName === currentUser.name))) ? 
+          `<button onclick="deleteFile('${file.id}')" class="text-red-400 hover:text-red-300 text-sm">Delete</button>` : ''}
       </div>
     `;
-    
-    filesList.appendChild(fileDiv);
+    filesList.appendChild(fileItem);
   });
 }
 
-function downloadFile(encodedUrl, encodedFilename) {
-  const url = decodeURIComponent(encodedUrl);
-  const filename = decodeURIComponent(encodedFilename);
-  
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
+async function deleteFile(fileId) {
+  if (!currentRoom || !authToken) return;
+
+  if (!confirm('Are you sure you want to delete this file?')) return;
+
+  try {
+    const response = await fetch(`/api/files/${currentRoom.code}/${fileId}`, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${authToken}`
+      }
+    });
+
+    const result = await response.json();
+    if (result.success) {
+      loadFiles();
+    } else {
+      showError(result.error || 'Delete failed');
+    }
+  } catch (err) {
+    console.error('Delete file error:', err);
+    showError('Delete failed. Please try again.');
+  }
+}
+
+function updateFilesButtonText() {
+  const count = sharedFiles.length;
+  const baseText = 'Files';
+  toggleFilesBtn.textContent = count > 0 ? `${baseText} (${count})` : baseText;
 }
 
 function formatFileSize(bytes) {
@@ -781,152 +841,153 @@ function formatFileSize(bytes) {
   const k = 1024;
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
-}
-
-function updateFilesButtonText() {
-  toggleFilesBtn.textContent = `📁 View Files (${sharedFiles.length})`;
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }
 
 function showUploadModal() {
-  uploadModal.classList.add('show');
+  uploadModal.classList.remove('hidden');
   uploadProgressBar.style.width = '0%';
   uploadStatus.textContent = 'Uploading...';
 }
 
 function hideUploadModal() {
-  uploadModal.classList.remove('show');
+  uploadModal.classList.add('hidden');
 }
 
-function escapeHtml(text) {
-  const map = {
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#039;'
-  };
-  return text.replace(/[&<>"']/g, function(m) { return map[m]; });
-}
-
-// Media controls
-let isAudioMuted = false;
-let isVideoMuted = false;
-let isScreenSharing = false;
-
+// Media controls functionality
 function initializeMediaControls() {
-  document.getElementById('micBtn').addEventListener('click', toggleMicrophone);
-  document.getElementById('cameraBtn').addEventListener('click', toggleCamera);
-  document.getElementById('screenShareBtn').addEventListener('click', toggleScreenShare);
+  const muteBtn = document.getElementById('muteBtn');
+  const cameraBtn = document.getElementById('cameraBtn');
+  const screenShareBtn = document.getElementById('screenShareBtn');
+
+  if (muteBtn) {
+    muteBtn.addEventListener('click', toggleMute);
+  }
+  if (cameraBtn) {
+    cameraBtn.addEventListener('click', toggleCamera);
+  }
+  if (screenShareBtn) {
+    screenShareBtn.addEventListener('click', toggleScreenShare);
+  }
 }
 
-function toggleMicrophone() {
-  if (!localStream) return;
-  
-  const audioTrack = localStream.getAudioTracks()[0];
-  if (audioTrack) {
-    isAudioMuted = !isAudioMuted;
-    audioTrack.enabled = !isAudioMuted;
-    
-    const micBtn = document.getElementById('micBtn');
-    micBtn.classList.toggle('bg-red-500', isAudioMuted);
-    micBtn.classList.toggle('bg-green-500', !isAudioMuted);
+function toggleMute() {
+  if (localStream) {
+    const audioTrack = localStream.getAudioTracks()[0];
+    if (audioTrack) {
+      audioTrack.enabled = !audioTrack.enabled;
+      const muteBtn = document.getElementById('muteBtn');
+      muteBtn.innerHTML = audioTrack.enabled ? 
+        '<i class="fas fa-microphone"></i>' : 
+        '<i class="fas fa-microphone-slash"></i>';
+      muteBtn.classList.toggle('muted', !audioTrack.enabled);
+    }
   }
 }
 
 function toggleCamera() {
-  if (!localStream) return;
-  
-  const videoTrack = localStream.getVideoTracks()[0];
-  if (videoTrack) {
-    isVideoMuted = !isVideoMuted;
-    videoTrack.enabled = !isVideoMuted;
-    
-    const cameraBtn = document.getElementById('cameraBtn');
-    cameraBtn.classList.toggle('bg-red-500', isVideoMuted);
-    cameraBtn.classList.toggle('bg-blue-500', !isVideoMuted);
-    
-    localVideo.style.display = isVideoMuted ? 'none' : 'block';
+  if (localStream) {
+    const videoTrack = localStream.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.enabled = !videoTrack.enabled;
+      const cameraBtn = document.getElementById('cameraBtn');
+      cameraBtn.innerHTML = videoTrack.enabled ? 
+        '<i class="fas fa-video"></i>' : 
+        '<i class="fas fa-video-slash"></i>';
+      cameraBtn.classList.toggle('camera-off', !videoTrack.enabled);
+    }
   }
 }
 
 async function toggleScreenShare() {
-  const screenBtn = document.getElementById('screenShareBtn');
+  const screenShareBtn = document.getElementById('screenShareBtn');
   
-  try {
-    if (!isScreenSharing) {
+  if (localScreenStream) {
+    // Stop screen sharing
+    localScreenStream.getTracks().forEach(track => track.stop());
+    localScreenStream = null;
+    
+    // Switch back to camera
+    if (localStream) {
+      localVideo.srcObject = localStream;
+      // Update all peer connections
+      Object.values(peerConnections).forEach(pc => {
+        const sender = pc.getSenders().find(s => 
+          s.track && s.track.kind === 'video'
+        );
+        if (sender && localStream.getVideoTracks()[0]) {
+          sender.replaceTrack(localStream.getVideoTracks()[0]);
+        }
+      });
+    }
+    
+    screenShareBtn.innerHTML = '<i class="fas fa-desktop"></i>';
+    screenShareBtn.classList.remove('sharing');
+  } else {
+    // Start screen sharing
+    try {
       localScreenStream = await navigator.mediaDevices.getDisplayMedia({
         video: true,
         audio: true
       });
       
-      const videoTrack = localScreenStream.getVideoTracks()[0];
+      localVideo.srcObject = localScreenStream;
       
+      // Update all peer connections
       Object.values(peerConnections).forEach(pc => {
         const sender = pc.getSenders().find(s => 
           s.track && s.track.kind === 'video'
         );
         if (sender) {
-          sender.replaceTrack(videoTrack);
+          sender.replaceTrack(localScreenStream.getVideoTracks()[0]);
         }
       });
       
-      localVideo.srcObject = localScreenStream;
-      isScreenSharing = true;
-      screenBtn.classList.add('bg-orange-500');
+      screenShareBtn.innerHTML = '<i class="fas fa-stop"></i>';
+      screenShareBtn.classList.add('sharing');
       
-      videoTrack.onended = stopScreenShare;
-    } else {
-      stopScreenShare();
+      // Handle screen share end
+      localScreenStream.getVideoTracks()[0].onended = () => {
+        toggleScreenShare();
+      };
+    } catch (err) {
+      console.error('Error starting screen share:', err);
+      showError('Could not start screen sharing');
     }
-  } catch (err) {
-    console.error('Error sharing screen:', err);
   }
-}
-
-function stopScreenShare() {
-  if (localScreenStream) {
-    localScreenStream.getTracks().forEach(track => track.stop());
-  }
-  
-  const videoTrack = localStream.getVideoTracks()[0];
-  Object.values(peerConnections).forEach(pc => {
-    const sender = pc.getSenders().find(s => 
-      s.track && s.track.kind === 'video'
-    );
-    if (sender) {
-      sender.replaceTrack(videoTrack);
-    }
-  });
-  
-  localVideo.srcObject = localStream;
-  isScreenSharing = false;
-  
-  const screenBtn = document.getElementById('screenShareBtn');
-  screenBtn.classList.remove('bg-orange-500');
 }
 
 function leaveCall() {
+  // Close all peer connections
+  Object.values(peerConnections).forEach(pc => pc.close());
+  Object.keys(peerConnections).forEach(key => delete peerConnections[key]);
+
+  // Stop local streams
   if (localStream) {
     localStream.getTracks().forEach(track => track.stop());
+    localStream = null;
   }
   if (localScreenStream) {
     localScreenStream.getTracks().forEach(track => track.stop());
+    localScreenStream = null;
   }
-  
-  Object.values(peerConnections).forEach(pc => pc.close());
-  
-  localStream = null;
-  localScreenStream = null;
+
+  // Clear video elements
+  localVideo.srcObject = null;
+  remoteVideos.innerHTML = '';
+
+  // Disconnect socket
+  if (socket) {
+    socket.disconnect();
+  }
+
+  // Reset state
   currentRoom = null;
   sharedFiles = [];
-  
-  remoteVideos.innerHTML = '';
-  messagesContainer.innerHTML = '';
-  userList.innerHTML = '';
-  roomCodeInput.value = '';
-  filesList.innerHTML = '<div id="noFilesMessage" class="text-gray-400 text-center py-8">No files shared yet</div>';
-  updateFilesButtonText();
-  
+
+  // Return to home
   showHomePage();
 }
+
+// Make deleteFile available globally
+window.deleteFile = deleteFile;
