@@ -1,4 +1,4 @@
-# HangoutHub - Video Conferencing & Chat App
+# HangoutHub - The Real Time Collaborative Platform
 
 A modern, real-time video conferencing and chat application built with Node.js, Socket.IO, and WebRTC.
 
